@@ -4,18 +4,20 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 import logging
 import urllib.parse
+import re
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Configurações do painel IPTV - CORRIGIDAS baseadas na investigação
+# Configurações do painel IPTV
 IPTV_BASE_URL = os.getenv('IPTV_BASE_URL', 'https://alerquina.officez.top')
 IPTV_USERNAME = os.getenv('IPTV_USERNAME')
 IPTV_PASSWORD = os.getenv('IPTV_PASSWORD')
 
-def create_iptv_user(username, password, email, max_connections=2, expiry_days=30):
+def create_iptv_user(username, email, max_connections=2, expiry_days=30):
     """
-    Cria usuário no painel IPTV Alerquina usando descobertas da investigação DevTools
+    Cria usuário no painel IPTV Alerquina
+    IMPORTANTE: Painel gera senha automaticamente - NÃO enviamos senha customizada!
     """
     try:
         # URL CORRETA descoberta na investigação: /api/lines
@@ -29,16 +31,15 @@ def create_iptv_user(username, password, email, max_connections=2, expiry_days=3
             'X-Requested-With': 'XMLHttpRequest'
         }
         
-        # Form Data EXATO descoberto na investigação DevTools
+        # Form Data CORRIGIDO - SEM campo password (painel gera automaticamente)
         form_data = {
             'key': 't-basic',  # Campo obrigatório descoberto
             'quick': '1',      # Campo obrigatório descoberto
             'method': 'post',  # Campo obrigatório descoberto
             'action': f'{IPTV_BASE_URL}/api/lines',  # Campo obrigatório descoberto
             
-            # Dados do usuário
+            # Dados do usuário - SEM PASSWORD!
             'username': username,
-            'password': password,
             'email': email,
             'name': username,
             
@@ -53,16 +54,16 @@ def create_iptv_user(username, password, email, max_connections=2, expiry_days=3
             'admin_password': IPTV_PASSWORD
         }
         
-        logging.info(f"=== CRIANDO USUÁRIO IPTV ===")
+        logging.info(f"=== CRIANDO USUÁRIO IPTV (SENHA AUTOMÁTICA) ===")
         logging.info(f"URL: {url}")
         logging.info(f"Username: {username}")
         logging.info(f"Email: {email}")
-        logging.info(f"Form Data: {form_data}")
+        logging.info(f"Form Data (sem password): {form_data}")
         
-        # Fazer requisição POST com Form Data (formato correto)
+        # Fazer requisição POST com Form Data
         response = requests.post(
             url,
-            data=form_data,  # IMPORTANTE: usar 'data' para form-urlencoded
+            data=form_data,
             headers=headers,
             timeout=30,
             verify=True,
@@ -71,25 +72,68 @@ def create_iptv_user(username, password, email, max_connections=2, expiry_days=3
         
         logging.info(f"Response Status: {response.status_code}")
         logging.info(f"Response Headers: {dict(response.headers)}")
-        logging.info(f"Response Text: {response.text[:500]}...")  # Primeiros 500 chars
+        logging.info(f"Response Text: {response.text[:1000]}...")  # Primeiros 1000 chars
         
         # Verificar resposta
         if response.status_code == 200:
             try:
                 # Tentar parsear como JSON
                 result = response.json()
+                logging.info(f"JSON Response: {result}")
+                
+                # Procurar pela senha gerada na resposta
+                generated_password = None
                 
                 # Verificar se criação foi bem-sucedida
                 if isinstance(result, dict) and ('message' in result):
                     message = result.get('message', '').lower()
+                    
                     if 'sucesso' in message or 'success' in message or 'gerado' in message:
+                        # Tentar extrair senha da mensagem
+                        # Padrões possíveis: "senha: ABC123", "password: XYZ789", etc.
+                        password_patterns = [
+                            r'senha[:\s]+([A-Za-z0-9]+)',
+                            r'password[:\s]+([A-Za-z0-9]+)', 
+                            r'pass[:\s]+([A-Za-z0-9]+)',
+                            r'login[:\s]+([A-Za-z0-9]+)',
+                            r'acesso[:\s]+([A-Za-z0-9]+)'
+                        ]
+                        
+                        full_response = result.get('message', '') + str(result.get('data', ''))
+                        
+                        for pattern in password_patterns:
+                            match = re.search(pattern, full_response, re.IGNORECASE)
+                            if match:
+                                generated_password = match.group(1)
+                                logging.info(f"✅ Senha encontrada: {generated_password}")
+                                break
+                        
+                        # Se não encontrou senha na mensagem, procurar em outros campos
+                        if not generated_password and 'data' in result:
+                            data = result['data']
+                            if isinstance(data, list) and len(data) > 0:
+                                item = data[0]
+                                if isinstance(item, dict):
+                                    # Procurar campos que podem conter a senha
+                                    password_fields = ['password', 'senha', 'pass', 'login', 'access']
+                                    for field in password_fields:
+                                        if field in item and item[field]:
+                                            generated_password = str(item[field])
+                                            logging.info(f"✅ Senha encontrada no campo '{field}': {generated_password}")
+                                            break
+                        
+                        # Se ainda não encontrou, usar senha padrão temporária
+                        if not generated_password:
+                            logging.warning("⚠️ Senha não encontrada na resposta, usando padrão temporário")
+                            generated_password = "VERIFICAR_PAINEL"
+                        
                         return {
                             'success': True,
                             'message': 'Usuário IPTV criado com sucesso',
                             'username': username,
-                            'password': password,
+                            'password': generated_password,  # Senha gerada pelo painel
                             'email': email,
-                            'server': IPTV_BASE_URL.replace('/login', ''),
+                            'server': IPTV_BASE_URL.replace('/login', '').replace('/api/lines', ''),
                             'connections': max_connections,
                             'expiry_days': expiry_days,
                             'response': result
@@ -101,39 +145,86 @@ def create_iptv_user(username, password, email, max_connections=2, expiry_days=3
                             'response': result
                         }
                 else:
-                    # Se resposta não tem estrutura esperada, mas status 200
-                    return {
-                        'success': True,
-                        'message': 'Usuário IPTV criado com sucesso (resposta inesperada)',
-                        'username': username,
-                        'password': password,
-                        'email': email,
-                        'server': IPTV_BASE_URL.replace('/login', ''),
-                        'connections': max_connections,
-                        'expiry_days': expiry_days,
-                        'response': response.text
-                    }
+                    # Resposta não tem estrutura esperada, mas status 200
+                    # Tentar extrair senha do HTML/texto
+                    response_text = response.text
+                    generated_password = None
                     
-            except ValueError:
-                # Resposta não é JSON válido, mas status 200
-                if len(response.text) < 1000:  # Se resposta é pequena, pode ser sucesso
+                    # Procurar padrões de senha no HTML
+                    password_patterns = [
+                        r'senha[:\s]*([A-Za-z0-9]+)',
+                        r'password[:\s]*([A-Za-z0-9]+)',
+                        r'pass[:\s]*([A-Za-z0-9]+)',
+                        r'Usuario.*?([A-Za-z0-9]{6,})',  # Sequência alfanumérica após "Usuario"
+                    ]
+                    
+                    for pattern in password_patterns:
+                        matches = re.findall(pattern, response_text, re.IGNORECASE)
+                        if matches:
+                            # Pegar o primeiro match que pareça uma senha (6+ caracteres)
+                            for match in matches:
+                                if len(match) >= 6 and match.isalnum():
+                                    generated_password = match
+                                    logging.info(f"✅ Senha extraída do HTML: {generated_password}")
+                                    break
+                            if generated_password:
+                                break
+                    
+                    if not generated_password:
+                        generated_password = "VERIFICAR_PAINEL"
+                    
                     return {
                         'success': True,
                         'message': 'Usuário IPTV criado com sucesso',
                         'username': username,
-                        'password': password,
+                        'password': generated_password,
                         'email': email,
-                        'server': IPTV_BASE_URL.replace('/login', ''),
+                        'server': IPTV_BASE_URL.replace('/login', '').replace('/api/lines', ''),
                         'connections': max_connections,
                         'expiry_days': expiry_days,
-                        'response': response.text
+                        'response': response_text[:500]  # Primeiros 500 chars
                     }
-                else:
-                    return {
-                        'success': False,
-                        'error': 'Resposta inválida do servidor',
-                        'details': response.text[:500]
-                    }
+                    
+            except ValueError:
+                # Resposta não é JSON, mas status 200 - extrair senha do texto
+                response_text = response.text
+                generated_password = None
+                
+                logging.info(f"Response não é JSON, tentando extrair senha do texto: {response_text[:200]}...")
+                
+                # Procurar padrões de senha no texto
+                password_patterns = [
+                    r'senha[:\s]*([A-Za-z0-9]+)',
+                    r'password[:\s]*([A-Za-z0-9]+)',
+                    r'pass[:\s]*([A-Za-z0-9]+)',
+                    r'([A-Za-z0-9]{8,})',  # Qualquer sequência de 8+ caracteres alfanuméricos
+                ]
+                
+                for pattern in password_patterns:
+                    matches = re.findall(pattern, response_text, re.IGNORECASE)
+                    if matches:
+                        for match in matches:
+                            if len(match) >= 6 and match.isalnum():
+                                generated_password = match
+                                logging.info(f"✅ Senha extraída: {generated_password}")
+                                break
+                        if generated_password:
+                            break
+                
+                if not generated_password:
+                    generated_password = "VERIFICAR_PAINEL"
+                
+                return {
+                    'success': True,
+                    'message': 'Usuário IPTV criado com sucesso',
+                    'username': username,
+                    'password': generated_password,
+                    'email': email,
+                    'server': IPTV_BASE_URL.replace('/login', '').replace('/api/lines', ''),
+                    'connections': max_connections,
+                    'expiry_days': expiry_days,
+                    'response': response_text[:500]
+                }
         else:
             return {
                 'success': False,
@@ -162,7 +253,8 @@ def home():
     return jsonify({
         'service': 'IPTV Integration API',
         'status': 'running',
-        'version': '2.0',
+        'version': '3.0',
+        'note': 'Painel gera senhas automaticamente',
         'endpoints': {
             'health': '/webhook/health (GET)',
             'test': '/webhook/test (POST)',
@@ -175,11 +267,11 @@ def home():
                 'headers': {'Content-Type': 'application/json'},
                 'body': {
                     'name': 'usuario123',
-                    'password': 'senha123',
                     'email': 'usuario@email.com',
                     'max_connections': 2,
                     'expiry_days': 30
-                }
+                },
+                'note': 'NÃO envie campo password - painel gera automaticamente'
             }
         }
     })
@@ -193,11 +285,12 @@ def health_check():
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'config': {
             'base_url': IPTV_BASE_URL,
-            'api_endpoint': f'{IPTV_BASE_URL}/api/lines',  # Endpoint correto
+            'api_endpoint': f'{IPTV_BASE_URL}/api/lines',
             'username_set': bool(IPTV_USERNAME),
             'password_set': bool(IPTV_PASSWORD)
         },
-        'version': '2.0'
+        'version': '3.0',
+        'note': 'Senhas são geradas automaticamente pelo painel'
     })
 
 @app.route('/webhook/test', methods=['POST'])
@@ -206,7 +299,6 @@ def test_webhook():
     try:
         data = request.get_json() or {}
         
-        # Log detalhado para debug
         logging.info("=== TESTE DE WEBHOOK ===")
         logging.info(f"Headers: {dict(request.headers)}")
         logging.info(f"Content-Type: {request.content_type}")
@@ -217,6 +309,7 @@ def test_webhook():
             'message': 'Webhook test successful',
             'received_data': data,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'version': '3.0',
             'debug_info': {
                 'content_type': request.content_type,
                 'method': request.method,
@@ -234,40 +327,35 @@ def test_webhook():
 def create_user_webhook():
     """
     Webhook principal para criar usuários IPTV
-    Recebe dados do Make.com e cria usuário no painel Alerquina
+    IMPORTANTE: NÃO envia senha - painel gera automaticamente!
     """
     try:
         # DEBUG: Log da requisição completa
-        logging.info("=== WEBHOOK CREATE-USER INICIADO ===")
+        logging.info("=== WEBHOOK CREATE-USER v3.0 (SENHA AUTOMÁTICA) ===")
         logging.info(f"Method: {request.method}")
         logging.info(f"Content-Type: {request.content_type}")
         logging.info(f"Headers: {dict(request.headers)}")
         logging.info(f"Raw data: {request.get_data()}")
-        logging.info(f"Args: {dict(request.args)}")
-        logging.info(f"Form: {dict(request.form)}")
         
-        # Obter dados da requisição - múltiplas tentativas
+        # Obter dados da requisição
         data = None
         
         # Tentativa 1: JSON
         try:
             data = request.get_json(force=True)
             if data:
-                logging.info(f"✅ JSON parseado com sucesso: {data}")
+                logging.info(f"✅ JSON parseado: {data}")
         except Exception as e:
             logging.info(f"❌ Falha ao parsear JSON: {str(e)}")
         
         # Tentativa 2: Form Data
         if not data and request.form:
             data = request.form.to_dict()
-            logging.info(f"✅ Form Data encontrado: {data}")
+            logging.info(f"✅ Form Data: {data}")
         
         # Tentativa 3: Raw data
         if not data:
             raw_data = request.get_data(as_text=True)
-            logging.info(f"Raw text data: {raw_data}")
-            
-            # Tentar parsear raw data como JSON
             if raw_data:
                 try:
                     import json
@@ -276,23 +364,15 @@ def create_user_webhook():
                 except:
                     logging.info("❌ Raw data não é JSON válido")
         
-        # Verificar se conseguiu obter dados
         if not data:
             return jsonify({
                 'success': False,
                 'code': 'NO_DATA',
-                'error': 'Nenhum dado recebido ou formato inválido',
-                'debug': {
-                    'content_type': request.content_type,
-                    'method': request.method,
-                    'has_json': bool(request.is_json),
-                    'has_form': bool(request.form),
-                    'raw_data_length': len(request.get_data())
-                }
+                'error': 'Nenhum dado recebido'
             }), 400
         
-        # Validar campos obrigatórios
-        required_fields = ['name', 'password', 'email']
+        # Validar campos obrigatórios (REMOVIDO password!)
+        required_fields = ['name', 'email']
         missing_fields = [field for field in required_fields if not data.get(field)]
         
         if missing_fields:
@@ -300,19 +380,18 @@ def create_user_webhook():
             return jsonify({
                 'success': False,
                 'code': 'MISSING_FIELDS',
-                'error': f'Campos obrigatórios ausentes: {", ".join(missing_fields)}',
-                'received_data': data,
-                'required_fields': required_fields
+                'error': f'Campos obrigatórios: {", ".join(required_fields)}',
+                'received_data': data
             }), 400
         
-        # Extrair e validar dados
+        # Extrair dados (SEM password!)
         username = str(data.get('name', '')).strip()
-        password = str(data.get('password', '')).strip()
         email = str(data.get('email', '')).strip()
         max_connections = int(data.get('max_connections', 2))
         expiry_days = int(data.get('expiry_days', 30))
         
-        logging.info(f"✅ Dados extraídos - User: {username}, Email: {email}, Connections: {max_connections}")
+        logging.info(f"✅ Dados extraídos - User: {username}, Email: {email}")
+        logging.info(f"📝 NOTA: Senha será gerada automaticamente pelo painel!")
         
         # Validações básicas
         if len(username) < 3:
@@ -322,13 +401,6 @@ def create_user_webhook():
                 'error': 'Username deve ter pelo menos 3 caracteres'
             }), 400
         
-        if len(password) < 6:
-            return jsonify({
-                'success': False,
-                'code': 'INVALID_PASSWORD',
-                'error': 'Password deve ter pelo menos 6 caracteres'
-            }), 400
-        
         if '@' not in email or '.' not in email:
             return jsonify({
                 'success': False,
@@ -336,78 +408,50 @@ def create_user_webhook():
                 'error': 'Email inválido'
             }), 400
         
-        # DEBUG: Verificar configurações
-        logging.info(f"🔧 Configurações:")
-        logging.info(f"   IPTV_BASE_URL: {IPTV_BASE_URL}")
-        logging.info(f"   IPTV_USERNAME: {'✅ Configurado' if IPTV_USERNAME else '❌ Não configurado'}")
-        logging.info(f"   IPTV_PASSWORD: {'✅ Configurado' if IPTV_PASSWORD else '❌ Não configurado'}")
-        
-        # Criar usuário no painel IPTV
-        logging.info(f"🚀 Iniciando criação do usuário: {username}")
-        result = create_iptv_user(username, password, email, max_connections, expiry_days)
+        # Criar usuário no painel IPTV (SEM senha customizada)
+        logging.info(f"🚀 Criando usuário com senha automática: {username}")
+        result = create_iptv_user(username, email, max_connections, expiry_days)
         
         if result['success']:
-            logging.info("🎉 Usuário criado com sucesso!")
+            logging.info(f"🎉 Usuário criado! Senha gerada: {result['password']}")
             return jsonify({
                 'success': True,
                 'message': 'Usuário IPTV criado com sucesso',
                 'data': {
                     'username': username,
-                    'password': password,  # Incluir senha para o email
+                    'password': result['password'],  # Senha gerada pelo painel
                     'email': email,
                     'server': result.get('server', IPTV_BASE_URL),
                     'connections': max_connections,
                     'expiry_days': expiry_days,
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'login_url': f"{IPTV_BASE_URL}/login",
-                    'api_response': result.get('response')
+                    'note': 'Senha gerada automaticamente pelo painel'
                 }
             })
         else:
-            logging.error(f"❌ Falha ao criar usuário: {result}")
-            error_code = 'LOGIN_ERROR' if 'login' in result.get('error', '').lower() else 'CREATE_ERROR'
+            logging.error(f"❌ Falha: {result}")
             return jsonify({
                 'success': False,
-                'code': error_code,
+                'code': 'CREATE_ERROR',
                 'error': result.get('error', 'Falha ao criar usuário'),
-                'details': result.get('details'),
-                'debug_info': result
+                'details': result.get('details')
             }), 400
             
     except Exception as e:
-        logging.error(f"💥 ERRO CRÍTICO no webhook: {str(e)}")
-        logging.exception("Stack trace completo:")
+        logging.error(f"💥 ERRO: {str(e)}")
+        logging.exception("Stack trace:")
         return jsonify({
             'success': False,
             'code': 'INTERNAL_ERROR',
-            'error': 'Erro interno do servidor',
+            'error': 'Erro interno',
             'details': str(e)
         }), 500
 
-# Rota adicional para debug (remover em produção)
-@app.route('/webhook/debug', methods=['GET', 'POST'])
-def debug_webhook():
-    """Endpoint para debug - mostra todas as informações da requisição"""
-    return jsonify({
-        'method': request.method,
-        'headers': dict(request.headers),
-        'args': dict(request.args),
-        'form': dict(request.form),
-        'json': request.get_json(silent=True),
-        'data': request.get_data(as_text=True),
-        'content_type': request.content_type,
-        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    })
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    
-    logging.info(f"🚀 Iniciando IPTV Integration API v2.0")
+    logging.info(f"🚀 IPTV Integration API v3.0 - Senhas Automáticas")
     logging.info(f"📡 Porta: {port}")
-    logging.info(f"🔧 Debug: {debug_mode}")
     logging.info(f"🌐 Base URL: {IPTV_BASE_URL}")
-    logging.info(f"👤 Username configurado: {bool(IPTV_USERNAME)}")
-    logging.info(f"🔑 Password configurado: {bool(IPTV_PASSWORD)}")
+    logging.info(f"📝 IMPORTANTE: Painel gera senhas automaticamente!")
     
-    app.run(host='0.0.0.0', port=port, debug=debug_mode)
+    app.run(host='0.0.0.0', port=port, debug=False)
